@@ -101,17 +101,164 @@ void MarkdownHighlighter::rebuildFormats() {
     m_currentSearchFormat = QTextCharFormat();
     m_currentSearchFormat.setBackground(m_darkMode ? QColor(QStringLiteral("#b36b20"))
                                                    : QColor(QStringLiteral("#ffad42")));
+
+    m_keywordFormat = QTextCharFormat();
+    m_keywordFormat.setForeground(m_darkMode ? QColor(QStringLiteral("#c678dd"))
+                                             : QColor(QStringLiteral("#a626a4")));
+    m_keywordFormat.setFontWeight(QFont::DemiBold);
+
+    m_preprocessorFormat = QTextCharFormat();
+    m_preprocessorFormat.setForeground(m_darkMode ? QColor(QStringLiteral("#e5c07b"))
+                                                  : QColor(QStringLiteral("#986801")));
+    m_preprocessorFormat.setFontWeight(QFont::DemiBold);
+
+    m_commentFormat = QTextCharFormat();
+    m_commentFormat.setForeground(m_darkMode ? QColor(QStringLiteral("#7f848e"))
+                                             : QColor(QStringLiteral("#a0a1a7")));
+    m_commentFormat.setFontItalic(true);
+
+    m_stringFormat = QTextCharFormat();
+    m_stringFormat.setForeground(m_darkMode ? QColor(QStringLiteral("#98c379"))
+                                            : QColor(QStringLiteral("#50a14f")));
+
+    m_numberFormat = QTextCharFormat();
+    m_numberFormat.setForeground(m_darkMode ? QColor(QStringLiteral("#d19a66"))
+                                            : QColor(QStringLiteral("#986801")));
+}
+
+void MarkdownHighlighter::setIsCode(bool isCode) {
+    if (m_isCode == isCode)
+        return;
+    m_isCode = isCode;
+    rehighlight();
+}
+
+void MarkdownHighlighter::setLanguage(const QString &languageId) {
+    if (m_languageId == languageId)
+        return;
+    m_languageId = languageId;
+    if (m_isCode)
+        rehighlight();
+}
+
+void MarkdownHighlighter::setDiagnostics(const QList<DiagnosticItem> &diagnostics) {
+    m_diagnosticsByLine.clear();
+    for (const DiagnosticItem &d : diagnostics) {
+        m_diagnosticsByLine.insert(d.line, d);
+    }
+    rehighlight();
 }
 
 void MarkdownHighlighter::highlightBlock(const QString &text) {
     if (!text.isEmpty()) {
-        highlightMarkers(text);
-        if (text.contains(QLatin1Char('`')) || text.contains(QLatin1Char('*'))
-            || text.contains(QLatin1Char('_')) || text.contains(QLatin1Char('['))) {
-            highlightInline(text);
+        if (m_isCode) {
+            highlightCode(text);
+        } else {
+            highlightMarkers(text);
+            if (text.contains(QLatin1Char('`')) || text.contains(QLatin1Char('*'))
+                || text.contains(QLatin1Char('_')) || text.contains(QLatin1Char('['))) {
+                highlightInline(text);
+            }
         }
     }
+    highlightDiagnostics(text);
     highlightSearch(text);
+}
+
+void MarkdownHighlighter::highlightDiagnostics(const QString &text) {
+    const int line = currentBlock().blockNumber();
+    const auto diags = m_diagnosticsByLine.values(line);
+    if (diags.isEmpty())
+        return;
+
+    for (const DiagnosticItem &diag : diags) {
+        int start = qMax(0, qMin(text.length(), diag.startChar));
+        int end = qMax(start + 1, qMin(text.length(), diag.endChar));
+        int len = qMax(1, end - start);
+        if (start >= text.length() && !text.isEmpty()) {
+            start = qMax(0, text.length() - 1);
+            len = 1;
+        }
+
+        QTextCharFormat fmt = format(start);
+        fmt.setUnderlineStyle(QTextCharFormat::WaveUnderline);
+        fmt.setUnderlineColor(diag.severity == 1
+            ? (m_darkMode ? QColor(QStringLiteral("#e06c75")) : QColor(QStringLiteral("#e45649")))
+            : (m_darkMode ? QColor(QStringLiteral("#e5c07b")) : QColor(QStringLiteral("#c18401"))));
+        setFormat(start, len, fmt);
+    }
+}
+
+void MarkdownHighlighter::highlightCode(const QString &text) {
+    const bool isPythonOrBash = (m_languageId == QStringLiteral("python") || m_languageId == QStringLiteral("bash"));
+
+    // 1. Numbers
+    static const QRegularExpression numRe(QStringLiteral("\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b"));
+    QRegularExpressionMatchIterator numIt = numRe.globalMatch(text);
+    while (numIt.hasNext()) {
+        const QRegularExpressionMatch m = numIt.next();
+        setFormat(m.capturedStart(), m.capturedLength(), m_numberFormat);
+    }
+
+    // 2. Keywords
+    static const QRegularExpression kwRe(
+        QStringLiteral("\\b(alignas|alignof|auto|bool|break|case|catch|char|class|const|"
+                       "constexpr|continue|default|delete|do|double|else|enum|explicit|export|"
+                       "extern|false|float|for|friend|goto|if|inline|int|long|mutable|namespace|"
+                       "new|noexcept|nullptr|operator|private|protected|public|register|"
+                       "reinterpret_cast|return|short|signed|sizeof|static|static_cast|struct|"
+                       "switch|template|this|throw|true|try|typedef|typeid|typename|union|"
+                       "unsigned|using|virtual|void|volatile|while|def|self|import|from|as|"
+                       "elif|pass|raise|yield|lambda|is|in|not|async|await|fn|let|mut|impl|"
+                       "trait|pub|use|crate|mod|where|match|type|func|package|var|"
+                       "property|signal|readonly|alias|required|component|real|string|color|url)\\b"));
+
+    QRegularExpressionMatchIterator kwIt = kwRe.globalMatch(text);
+    while (kwIt.hasNext()) {
+        const QRegularExpressionMatch m = kwIt.next();
+        setFormat(m.capturedStart(), m.capturedLength(), m_keywordFormat);
+    }
+
+    // 3. Preprocessor directives (for C/C++ and others)
+    if (!isPythonOrBash) {
+        static const QRegularExpression ppRe(QStringLiteral("^\\s*(#[a-zA-Z_]+)"));
+        const QRegularExpressionMatch ppMatch = ppRe.match(text);
+        if (ppMatch.hasMatch()) {
+            setFormat(ppMatch.capturedStart(1), ppMatch.capturedLength(1), m_preprocessorFormat);
+
+            // Highlight header in #include <...>
+            static const QRegularExpression incHeaderRe(QStringLiteral("^\\s*#\\s*include\\s*(<[^>]+>)"));
+            const QRegularExpressionMatch incMatch = incHeaderRe.match(text);
+            if (incMatch.hasMatch()) {
+                setFormat(incMatch.capturedStart(1), incMatch.capturedLength(1), m_stringFormat);
+            }
+        }
+    }
+
+    // 4. Strings
+    static const QRegularExpression strRe(QStringLiteral("\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'"));
+    QRegularExpressionMatchIterator strIt = strRe.globalMatch(text);
+    while (strIt.hasNext()) {
+        const QRegularExpressionMatch m = strIt.next();
+        setFormat(m.capturedStart(), m.capturedLength(), m_stringFormat);
+    }
+
+    // 5. Comments
+    if (isPythonOrBash) {
+        static const QRegularExpression pyCommentRe(QStringLiteral("#.*$"));
+        QRegularExpressionMatchIterator cIt = pyCommentRe.globalMatch(text);
+        while (cIt.hasNext()) {
+            const QRegularExpressionMatch m = cIt.next();
+            setFormat(m.capturedStart(), m.capturedLength(), m_commentFormat);
+        }
+    } else {
+        static const QRegularExpression cCommentRe(QStringLiteral("//.*$|/\\*.*?\\*/"));
+        QRegularExpressionMatchIterator cIt = cCommentRe.globalMatch(text);
+        while (cIt.hasNext()) {
+            const QRegularExpressionMatch m = cIt.next();
+            setFormat(m.capturedStart(), m.capturedLength(), m_commentFormat);
+        }
+    }
 }
 
 void MarkdownHighlighter::highlightSearch(const QString &text) {

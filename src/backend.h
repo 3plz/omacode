@@ -9,6 +9,8 @@
 #include <QUrl>
 #include <QVariantList>
 #include <memory>
+#include "lspclient.h"
+#include "terminal.h"
 
 class MarkdownHighlighter;
 class QTextDocument;
@@ -28,6 +30,14 @@ class Backend : public QObject {
     Q_PROPERTY(QString themeForeground READ themeForeground NOTIFY themeColorsChanged)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeColorsChanged)
     Q_PROPERTY(QString themeSelection READ themeSelection NOTIFY themeColorsChanged)
+    Q_PROPERTY(bool lspActive READ lspActive NOTIFY lspActiveChanged)
+    Q_PROPERTY(QString lspServerName READ lspServerName NOTIFY lspActiveChanged)
+    Q_PROPERTY(QString lspStatus READ lspStatus NOTIFY lspStatusChanged)
+    Q_PROPERTY(bool isCodeDocument READ isCodeDocument NOTIFY fileUrlChanged)
+    Q_PROPERTY(QVariantList completions READ completions NOTIFY completionsChanged)
+    Q_PROPERTY(bool hasCompletions READ hasCompletions NOTIFY completionsChanged)
+    Q_PROPERTY(QString currentDiagnostic READ currentDiagnostic NOTIFY currentDiagnosticChanged)
+    Q_PROPERTY(Terminal* terminal READ terminal CONSTANT)
 
 public:
     explicit Backend(QObject *parent = nullptr);
@@ -49,6 +59,14 @@ public:
     QString themeForeground() const { return m_themeForeground; }
     QString themeAccent() const { return m_themeAccent; }
     QString themeSelection() const { return m_themeSelection; }
+    bool lspActive() const { return m_lspClient.isRunning(); }
+    QString lspServerName() const { return m_lspClient.serverName(); }
+    QString lspStatus() const { return m_lspStatus; }
+    bool isCodeDocument() const;
+    QVariantList completions() const { return m_completions; }
+    bool hasCompletions() const { return !m_completions.isEmpty(); }
+    QString currentDiagnostic() const { return m_currentDiagnostic; }
+    Terminal *terminal() { return &m_terminal; }
     static int countWords(const QString &text);
     static QString normalizedLinkUrl(const QString &clipboardText);
     static QString suggestedFileName(const QString &text);
@@ -74,6 +92,12 @@ public:
     Q_INVOKABLE void openExternalUrl(const QUrl &url);
     Q_INVOKABLE QVariantMap windowGeometry() const;
     Q_INVOKABLE void saveWindowGeometry(int x, int y, int width, int height, bool maximized);
+    Q_INVOKABLE void requestCompletion(int position);
+    Q_INVOKABLE void requestDefinition(int position);
+    Q_INVOKABLE void clearCompletions();
+    Q_INVOKABLE void updateCursorPosition(int position);
+    Q_INVOKABLE int lineColToPosition(int line, int col) const;
+    Q_INVOKABLE QVariantMap positionToLineCol(int position) const;
 
 signals:
     void fileUrlChanged();
@@ -88,6 +112,11 @@ signals:
     void saveDialogRequested(const QUrl &suggestedUrl);
     void saveSucceeded();
     void externalChangeDetected(bool deleted, bool locallyModified);
+    void lspActiveChanged();
+    void lspStatusChanged();
+    void completionsChanged();
+    void currentDiagnosticChanged();
+    void jumpToPositionRequested(int position);
 
 private:
     void loadDocumentText(const QString &text);
@@ -110,6 +139,10 @@ private:
     void watchCurrentFile();
     void loadOmarchyTheme();
     void watchOmarchyTheme();
+    void onLspDiagnostics(const QList<LspDiagnostic> &diagnostics);
+    void onLspCompletions(const QVariantList &items, int line, int character);
+    void onLspDefinition(const QString &targetUri, int targetLine, int targetCharacter);
+    void updateLspStatus();
 
     QUrl m_fileUrl;
     bool m_modified = false;
@@ -140,4 +173,12 @@ private:
     QString m_themeAccent;
     QString m_themeSelection;
     QFileSystemWatcher m_themeWatcher;
+
+    LspClient m_lspClient;
+    QTimer m_lspSyncTimer;
+    QString m_lspStatus;
+    QVariantList m_completions;
+    QString m_currentDiagnostic;
+    int m_lastCursorPos = 0;
+    Terminal m_terminal;
 };

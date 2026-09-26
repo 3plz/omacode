@@ -27,6 +27,19 @@ public:
         Span markers[2];
     };
 
+    struct DiagnosticItem {
+        int line = 0;
+        int startChar = 0;
+        int endChar = 0;
+        int severity = 1; // 1: Error, 2: Warning
+    };
+
+    void setIsCode(bool isCode);
+    bool isCode() const { return m_isCode; }
+    void setLanguage(const QString &languageId);
+    QString languageId() const { return m_languageId; }
+    void setDiagnostics(const QList<DiagnosticItem> &diagnostics);
+
     // Single source of truth for inline markdown spans: the highlighter uses it
     // to style content and hide markers, and the editor uses it (via
     // Backend::hiddenRangesAt) to skip the caret over the hidden markers.
@@ -40,8 +53,12 @@ private:
     void highlightMarkers(const QString &text);
     void highlightInline(const QString &text);
     void highlightSearch(const QString &text);
+    void highlightCode(const QString &text);
+    void highlightDiagnostics(const QString &text);
 
     bool m_darkMode = true;
+    bool m_isCode = false;
+    QString m_languageId;
     QString m_customBackground;
     QString m_customForeground;
     QString m_customAccent;
@@ -53,8 +70,15 @@ private:
     QTextCharFormat m_codeFormat;
     QTextCharFormat m_quoteFormat;
     QTextCharFormat m_linkFormat;
+    QTextCharFormat m_keywordFormat;
+    QTextCharFormat m_preprocessorFormat;
+    QTextCharFormat m_commentFormat;
+    QTextCharFormat m_stringFormat;
+    QTextCharFormat m_numberFormat;
     QString m_searchQuery;
     int m_currentMatchStart = -1;
     QTextCharFormat m_searchFormat;
     QTextCharFormat m_currentSearchFormat;
+    QMultiHash<int, DiagnosticItem> m_diagnosticsByLine;
 };
+

@@ -11,6 +11,7 @@
 #include <QFile>
 
 #include "backend.h"
+#include "linenumbergutter.h"
 #include "systemtheme.h"
 
 int main(int argc, char *argv[]) {
@@ -27,6 +28,8 @@ int main(int argc, char *argv[]) {
     app.setOrganizationDomain(QStringLiteral("omacom.io"));
 
     QQuickStyle::setStyle(QStringLiteral("Material"));
+
+    qmlRegisterType<LineNumberGutter>("Omawrite", 1, 0, "LineNumberGutter");
 
     Backend backend(&app);
     SystemTheme systemTheme(&app);

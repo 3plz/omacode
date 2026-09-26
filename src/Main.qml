@@ -4,6 +4,7 @@ import QtQuick.Controls.Material
 import QtQuick.Dialogs as Dialogs
 import QtQuick.Layouts
 import QtQuick.Window
+import Omawrite 1.0
 import "EditorMutations.js" as EditorMutations
 
 ApplicationWindow {
@@ -29,6 +30,9 @@ ApplicationWindow {
     readonly property int editorWidth: Math.min(
         Math.round(writerFontMetrics.averageCharacterWidth * 65),
         Math.max(360, width - Math.round(writerFontMetrics.averageCharacterWidth * 20)))
+    readonly property int gutterWidth: Math.max(
+        scaledSize(44),
+        Math.round((String(editor.lineCount).length + 2) * writerFontMetrics.averageCharacterWidth))
     property bool closeConfirmed: false
     property bool searchOpen: false
     property bool searchUpdating: false
@@ -38,6 +42,8 @@ ApplicationWindow {
     property string pendingAction: ""
     property bool replaceOpen: false
     property bool awaitingPendingSave: false
+    property bool terminalOpen: false
+    property real terminalHeight: scaledSize(220)
 
     Material.theme: darkMode ? Material.Dark : Material.Light
     Material.accent: backend.themeAccent
@@ -89,6 +95,15 @@ ApplicationWindow {
         win.visibility = win.visibility === Window.FullScreen
             ? Window.Windowed
             : Window.FullScreen;
+    }
+
+    function toggleTerminal() {
+        terminalOpen = !terminalOpen;
+        if (terminalOpen) {
+            terminalInput.forceActiveFocus();
+        } else {
+            editor.forceActiveFocus();
+        }
     }
 
     function updateSearch() {
@@ -237,6 +252,30 @@ ApplicationWindow {
         onActivated: win.moveSearch(1)
     }
 
+    Shortcut {
+        sequence: "Ctrl+Space"
+        context: Qt.WindowShortcut
+        onActivated: {
+            if (backend.lspActive)
+                backend.requestCompletion(editor.cursorPosition);
+        }
+    }
+
+    Shortcut {
+        sequence: "F12"
+        context: Qt.WindowShortcut
+        onActivated: {
+            if (backend.lspActive)
+                backend.requestDefinition(editor.cursorPosition);
+        }
+    }
+
+    Shortcut {
+        sequence: "Ctrl+T"
+        context: Qt.ApplicationShortcut
+        onActivated: win.toggleTerminal()
+    }
+
     Connections {
         target: backend
 
@@ -265,13 +304,28 @@ ApplicationWindow {
             externalChangeDialog.locallyModified = locallyModified;
             externalChangeDialog.open();
         }
+
+        function onJumpToPositionRequested(pos) {
+            editor.cursorPosition = pos;
+            editorFlick.ensureCursorVisible();
+            editor.forceActiveFocus();
+        }
+
+        function onCompletionsChanged() {
+            if (backend.hasCompletions) {
+                completionList.currentIndex = 0;
+                completionPopup.open();
+            } else {
+                completionPopup.close();
+            }
+        }
     }
 
     Dialogs.FileDialog {
         id: openFileDialog
         title: "Open File"
         fileMode: Dialogs.FileDialog.OpenFile
-        nameFilters: ["Markdown files (*.md *.markdown)", "All files (*)"]
+        nameFilters: ["All supported files (*.md *.markdown *.cpp *.c *.h *.hpp *.py *.rs *.go *.js *.ts *.qml *.sh)", "Markdown files (*.md *.markdown)", "Source code files (*.cpp *.c *.h *.hpp *.py *.rs *.go *.js *.ts *.qml *.sh)", "All files (*)"]
         onAccepted: win.requestOpen(selectedFile)
     }
 
@@ -279,7 +333,7 @@ ApplicationWindow {
         id: saveFileDialog
         title: "Save File"
         fileMode: Dialogs.FileDialog.SaveFile
-        nameFilters: ["Markdown files (*.md *.markdown)", "All files (*)"]
+        nameFilters: ["Markdown files (*.md *.markdown)", "Source code files (*.cpp *.c *.h *.hpp *.py *.rs *.go *.js *.ts *.qml *.sh)", "All files (*)"]
         onAccepted: backend.saveAs(selectedFile)
         onRejected: {
             backend.fileDialogCanceled();
@@ -331,7 +385,7 @@ ApplicationWindow {
         standardButtons: Dialog.Close
         anchors.centerIn: parent
         contentItem: Label {
-            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
+            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+T  Terminal\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+Space  Complete\nF12  Definition\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
             lineHeight: 1.5
         }
     }
@@ -339,14 +393,38 @@ ApplicationWindow {
     Item {
         anchors.fill: parent
 
+        LineNumberGutter {
+            id: gutter
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: win.terminalOpen ? terminalPanel.top : parent.bottom
+            width: win.gutterWidth
+            textDocument: editor.textDocument
+            contentY: editorFlick.contentY
+            textOffsetY: editor.y
+            currentLine: (backend.positionToLineCol(editor.cursorPosition).line || 0) + 1
+            font: editor.font
+            textColor: win.mutedColor
+            currentLineColor: backend.themeAccent
+            separatorColor: win.darkMode ? "#2b2d30" : "#e0e0e0"
+            backgroundColor: win.pageColor
+            onLineClicked: function(pos) {
+                editor.cursorPosition = pos;
+                editor.forceActiveFocus();
+            }
+        }
+
         Flickable {
             id: editorFlick
-            anchors.fill: parent
-            anchors.leftMargin: 24
-            anchors.rightMargin: 24
+            anchors.left: gutter.right
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: win.terminalOpen ? terminalPanel.top : parent.bottom
+            anchors.leftMargin: win.scaledSize(14)
+            anchors.rightMargin: win.scaledSize(20)
             clip: true
-            contentWidth: width
-            contentHeight: Math.max(height, editor.y + editor.implicitHeight + 220)
+            contentWidth: Math.max(width, editor.implicitWidth + win.scaledSize(32))
+            contentHeight: Math.max(height, editor.y + editor.implicitHeight + win.scaledSize(160))
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
@@ -360,6 +438,12 @@ ApplicationWindow {
                 // anchors. Padding stops the thumb, the inset the track.
                 bottomPadding: win.scaledSize(32)
                 bottomInset: win.scaledSize(32)
+            }
+            ScrollBar.horizontal: ScrollBar {
+                policy: ScrollBar.AsNeeded
+                active: hovered || pressed
+                rightPadding: win.scaledSize(32)
+                rightInset: win.scaledSize(32)
             }
 
             Timer {
@@ -463,6 +547,18 @@ ApplicationWindow {
                 // finger scrolling carries pixel-precise pixelDelta.
                 acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 onWheel: function(wheel) {
+                    if (wheel.pixelDelta.x !== 0 || wheel.angleDelta.x !== 0) {
+                        var dx = wheel.pixelDelta.x !== 0 ? wheel.pixelDelta.x : (wheel.angleDelta.x / 120 * editorFlick.wheelStep);
+                        editorFlick.contentX = Math.max(0, Math.min(Math.max(0, editorFlick.contentWidth - editorFlick.width), editorFlick.contentX - dx));
+                        wheel.accepted = true;
+                        return;
+                    }
+                    if (wheel.modifiers & Qt.ShiftModifier) {
+                        var dxShift = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y : (wheel.angleDelta.y / 120 * editorFlick.wheelStep);
+                        editorFlick.contentX = Math.max(0, Math.min(Math.max(0, editorFlick.contentWidth - editorFlick.width), editorFlick.contentX - dxShift));
+                        wheel.accepted = true;
+                        return;
+                    }
                     scrollLinger.restart();
                     if (wheel.pixelDelta.y !== 0)
                         editorFlick.scrollTo(editorFlick.clampContentY(editorFlick.contentY - wheel.pixelDelta.y));
@@ -518,27 +614,39 @@ ApplicationWindow {
             // Keep the editing caret within the viewport so writing past the
             // bottom edge scrolls the page along with the text.
             function ensureCursorVisible() {
-                var margin = win.editorFontPixelSize * 2;
+                var vMargin = win.editorFontPixelSize * 2;
                 var cursorTop = editor.y + editor.cursorRectangle.y;
                 var cursorBottom = cursorTop + editor.cursorRectangle.height;
                 var maxContentY = Math.max(0, contentHeight - height);
 
-                if (cursorBottom + margin > contentY + height)
-                    scrollTo(Math.min(maxContentY, cursorBottom + margin - height));
-                else if (cursorTop - margin < contentY)
-                    scrollTo(Math.max(0, cursorTop - margin));
+                if (cursorBottom + vMargin > contentY + height)
+                    scrollTo(Math.min(maxContentY, cursorBottom + vMargin - height));
+                else if (cursorTop - vMargin < contentY)
+                    scrollTo(Math.max(0, cursorTop - vMargin));
+
+                var cursorLeft = editor.x + editor.cursorRectangle.x;
+                var cursorRight = cursorLeft + editor.cursorRectangle.width;
+                var hMargin = win.editorFontPixelSize * 3;
+                var maxContentX = Math.max(0, contentWidth - width);
+
+                if (cursorRight + hMargin > contentX + width)
+                    contentX = Math.min(maxContentX, cursorRight + hMargin - width);
+                else if (cursorLeft - hMargin < contentX)
+                    contentX = Math.max(0, cursorLeft - hMargin);
             }
 
             TextEdit {
                 id: editor
                 objectName: "sourceEditor"
-                x: Math.round((editorFlick.width - width) / 2)
-                y: Math.max(42, Math.round(win.height * 0.05))
-                width: win.editorWidth
-                height: Math.max(editorFlick.height - y - 96, implicitHeight + 20)
+                x: 0
+                y: win.scaledSize(20)
+                width: backend.isCodeDocument
+                    ? Math.max(editorFlick.width - win.scaledSize(32), implicitWidth + win.scaledSize(32))
+                    : Math.max(win.editorWidth, editorFlick.width - win.scaledSize(32))
+                height: Math.max(editorFlick.height - y - win.scaledSize(60), implicitHeight + win.scaledSize(20))
                 text: ""
                 textFormat: TextEdit.PlainText
-                wrapMode: TextEdit.Wrap
+                wrapMode: backend.isCodeDocument ? TextEdit.NoWrap : TextEdit.Wrap
                 selectByMouse: true
                 persistentSelection: true
                 activeFocusOnPress: true
@@ -601,6 +709,18 @@ ApplicationWindow {
                 function smartReturn(softBreak) {
                     if (softBreak) {
                         replaceSelectionWith("\n");
+                        return;
+                    }
+                    if (backend.isCodeDocument) {
+                        var lineStart = text.lastIndexOf("\n", cursorPosition - 1) + 1;
+                        var currentLine = text.slice(lineStart, cursorPosition);
+                        var indentMatch = currentLine.match(/^([ \t]*)/);
+                        var indent = indentMatch ? indentMatch[1] : "";
+                        var trimmed = currentLine.trim();
+                        if (trimmed.endsWith("{") || trimmed.endsWith(":") || trimmed.endsWith("(")) {
+                            indent += "    ";
+                        }
+                        replaceSelectionWith("\n" + indent);
                         return;
                     }
                     var lineStart = text.lastIndexOf("\n", cursorPosition - 1) + 1;
@@ -731,8 +851,50 @@ ApplicationWindow {
                     return true;
                 }
 
+                function acceptCompletion() {
+                    if (!backend.hasCompletions)
+                        return;
+                    var item = backend.completions[completionList.currentIndex];
+                    if (!item)
+                        return;
+                    var insert = item.insertText || item.label;
+                    var pos = cursorPosition;
+                    var start = pos;
+                    while (start > 0 && /\w/.test(text.charAt(start - 1))) {
+                        start--;
+                    }
+                    EditorMutations.replaceRange(editor, start, pos, insert);
+                    backend.clearCompletions();
+                    completionPopup.close();
+                    forceActiveFocus();
+                }
+
                 Keys.priority: Keys.BeforeItem
                 Keys.onPressed: function(event) {
+                    if (completionPopup.opened) {
+                        if (event.key === Qt.Key_Down) {
+                            completionList.incrementCurrentIndex();
+                            event.accepted = true;
+                            return;
+                        }
+                        if (event.key === Qt.Key_Up) {
+                            completionList.decrementCurrentIndex();
+                            event.accepted = true;
+                            return;
+                        }
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Tab) {
+                            acceptCompletion();
+                            event.accepted = true;
+                            return;
+                        }
+                        if (event.key === Qt.Key_Escape) {
+                            completionPopup.close();
+                            backend.clearCompletions();
+                            event.accepted = true;
+                            return;
+                        }
+                    }
+
                     var pasteKey = (event.key === Qt.Key_V)
                         && (event.modifiers & Qt.ControlModifier)
                         && !(event.modifiers & (Qt.AltModifier | Qt.MetaModifier | Qt.ShiftModifier));
@@ -750,6 +912,9 @@ ApplicationWindow {
                     var commandModifier = event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier);
                     if (returnKey && !commandModifier) {
                         smartReturn(event.modifiers & Qt.ShiftModifier);
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Tab && !commandModifier) {
+                        replaceSelectionWith("    ");
                         event.accepted = true;
                     } else if (!commandModifier && event.key === Qt.Key_Backspace
                                && deleteParagraphBreakBehindCursor()) {
@@ -770,18 +935,29 @@ ApplicationWindow {
                     }
                 }
 
+                onCursorPositionChanged: {
+                    backend.updateCursorPosition(cursorPosition);
+                }
+
                 onTextChanged: {
                     if (win.searchUpdating)
                         return;
                     var contentChanged = backend.editorTextChanged();
                     if (win.searchOpen && contentChanged)
                         win.updateSearch();
+
+                    if (backend.isCodeDocument && backend.lspActive && cursorPosition > 0) {
+                        var charJustTyped = text.charAt(cursorPosition - 1);
+                        if (charJustTyped === "." || charJustTyped === ">" || charJustTyped === ":") {
+                            backend.requestCompletion(cursorPosition);
+                        }
+                    }
                 }
 
                 Text {
                     anchors.left: parent.left
                     anchors.top: parent.top
-                    text: "# Start writing"
+                    text: backend.isCodeDocument ? "// Start coding" : "# Start writing"
                     visible: editor.text.length === 0 && !editor.activeFocus
                     color: win.mutedColor
                     font.family: editor.font.family
@@ -792,6 +968,239 @@ ApplicationWindow {
                 Component.onCompleted: {
                     backend.attachDocument(textDocument);
                     forceActiveFocus();
+                }
+            }
+        }
+
+        Rectangle {
+            id: terminalPanel
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: win.scaledSize(32)
+            height: win.terminalHeight
+            visible: win.terminalOpen
+            color: win.darkMode ? "#181a1f" : "#f4f4f4"
+            clip: true
+            z: 5
+
+            Rectangle {
+                id: terminalSplitter
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: win.scaledSize(3)
+                color: win.darkMode ? "#282c34" : "#d8d8d8"
+
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.topMargin: -win.scaledSize(4)
+                    anchors.bottomMargin: -win.scaledSize(4)
+                    cursorShape: Qt.SplitVCursor
+                    property real startY: 0
+                    property real startH: 0
+                    onPressed: function(mouse) {
+                        startY = mouse.y;
+                        startH = win.terminalHeight;
+                    }
+                    onPositionChanged: function(mouse) {
+                        var delta = mouse.y - startY;
+                        win.terminalHeight = Math.max(win.scaledSize(100), Math.min(win.height * 0.75, startH - delta));
+                    }
+                }
+            }
+
+            Rectangle {
+                id: terminalHeader
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: terminalSplitter.bottom
+                height: win.scaledSize(26)
+                color: win.darkMode ? "#21252b" : "#ebebeb"
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: win.scaledSize(10)
+                    anchors.rightMargin: win.scaledSize(8)
+                    spacing: 8
+
+                    Label {
+                        text: "Terminal"
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(11)
+                        font.bold: true
+                        color: win.darkMode ? "#abb2bf" : "#495162"
+                    }
+
+                    Label {
+                        text: backend.terminal.workingDirectoryShort
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(11)
+                        color: win.mutedColor
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
+                        text: backend.terminal.isRunning ? "Running..." : ""
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(11)
+                        color: backend.themeAccent
+                        visible: backend.terminal.isRunning
+                    }
+
+                    Label {
+                        text: "Clear"
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(11)
+                        color: clearMouse.containsMouse ? win.strongTextColor : win.mutedColor
+                        MouseArea {
+                            id: clearMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: backend.terminal.clear()
+                        }
+                    }
+
+                    Label {
+                        text: "✕"
+                        font.pixelSize: win.scaledSize(12)
+                        color: closeMouse.containsMouse ? win.strongTextColor : win.mutedColor
+                        MouseArea {
+                            id: closeMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: win.toggleTerminal()
+                        }
+                    }
+                }
+            }
+
+            Flickable {
+                id: termFlick
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: terminalHeader.bottom
+                anchors.bottom: termInputRow.top
+                anchors.leftMargin: win.scaledSize(10)
+                anchors.rightMargin: win.scaledSize(6)
+                anchors.topMargin: win.scaledSize(4)
+                anchors.bottomMargin: win.scaledSize(4)
+                clip: true
+                contentWidth: termOutput.width
+                contentHeight: termOutput.height
+                boundsBehavior: Flickable.StopAtBounds
+
+                ScrollBar.vertical: ScrollBar {
+                    policy: ScrollBar.AsNeeded
+                    active: hovered || pressed
+                }
+
+                TextEdit {
+                    id: termOutput
+                    width: termFlick.width
+                    height: Math.max(termFlick.height, implicitHeight)
+                    readOnly: true
+                    selectByMouse: true
+                    text: backend.terminal.output
+                    textFormat: TextEdit.PlainText
+                    font.family: "iA Writer Mono S"
+                    font.pixelSize: win.scaledSize(12)
+                    color: win.textColor
+                    selectionColor: win.selectionFill
+                    selectedTextColor: win.strongTextColor
+                    wrapMode: TextEdit.Wrap
+
+                    onTextChanged: {
+                        Qt.callLater(function() {
+                            if (termFlick.contentHeight > termFlick.height)
+                                termFlick.contentY = termFlick.contentHeight - termFlick.height;
+                        });
+                    }
+                }
+            }
+
+            Rectangle {
+                id: termInputRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: win.scaledSize(28)
+                color: win.darkMode ? "#1b1d23" : "#f0f0f0"
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: win.scaledSize(10)
+                    anchors.rightMargin: win.scaledSize(8)
+                    spacing: win.scaledSize(6)
+
+                    Label {
+                        text: "$ "
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(12)
+                        font.bold: true
+                        color: backend.themeAccent
+                    }
+
+                    TextInput {
+                        id: terminalInput
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        verticalAlignment: TextInput.AlignVCenter
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(12)
+                        color: win.textColor
+                        selectionColor: win.selectionFill
+                        selectedTextColor: win.strongTextColor
+                        selectByMouse: true
+                        clip: true
+
+                        Keys.onPressed: function(event) {
+                            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                var cmd = text;
+                                text = "";
+                                backend.terminal.sendInput(cmd);
+                                event.accepted = true;
+                                return;
+                            }
+                            if (event.key === Qt.Key_Up) {
+                                text = backend.terminal.historyUp(text);
+                                cursorPosition = text.length;
+                                event.accepted = true;
+                                return;
+                            }
+                            if (event.key === Qt.Key_Down) {
+                                text = backend.terminal.historyDown();
+                                cursorPosition = text.length;
+                                event.accepted = true;
+                                return;
+                            }
+                            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C) {
+                                if (backend.terminal.isRunning) {
+                                    backend.terminal.cancel();
+                                    event.accepted = true;
+                                    return;
+                                }
+                            }
+                            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
+                                backend.terminal.clear();
+                                event.accepted = true;
+                                return;
+                            }
+                            if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_T) {
+                                win.toggleTerminal();
+                                event.accepted = true;
+                                return;
+                            }
+                            if (event.key === Qt.Key_Escape) {
+                                win.toggleTerminal();
+                                event.accepted = true;
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -821,14 +1230,26 @@ ApplicationWindow {
                 onClicked: backend.openDialog()
             }
 
+            FooterIconButton {
+                objectName: "terminalButton"
+                iconName: "terminal"
+                iconColor: win.terminalOpen ? backend.themeAccent : win.mutedColor
+                tooltip: "Terminal (Ctrl+T)"
+                onClicked: win.toggleTerminal()
+            }
+
             Label {
-                text: backend.status
-                color: win.mutedColor
+                text: backend.currentDiagnostic !== ""
+                    ? backend.currentDiagnostic
+                    : (backend.lspStatus !== "" ? backend.lspStatus : backend.status)
+                color: backend.currentDiagnostic !== ""
+                    ? (win.darkMode ? "#e06c75" : "#e45649")
+                    : win.mutedColor
                 font.family: "iA Writer Mono S"
                 font.pixelSize: win.scaledSize(11)
                 visible: text !== ""
                 elide: Text.ElideRight
-                width: Math.min(360, win.width / 3)
+                width: Math.min(520, win.width / 2)
                 height: win.scaledSize(16)
                 verticalAlignment: Text.AlignVCenter
             }
@@ -839,12 +1260,94 @@ ApplicationWindow {
             anchors.bottom: parent.bottom
             anchors.rightMargin: 12
             anchors.bottomMargin: 10
-            text: backend.wordCount + (backend.wordCount === 1 ? " Word" : " Words")
+            text: {
+                var lc = backend.positionToLineCol(editor.cursorPosition);
+                var posStr = "Ln " + ((lc.line || 0) + 1) + ", Col " + ((lc.character || 0) + 1);
+                if (backend.isCodeDocument)
+                    return posStr;
+                return posStr + "  •  " + backend.wordCount + (backend.wordCount === 1 ? " Word" : " Words");
+            }
             color: win.mutedColor
             opacity: 0.75
             font.family: "iA Writer Mono S"
             font.pixelSize: win.scaledSize(11)
         }
+
+    Popup {
+        id: completionPopup
+        parent: win.contentItem
+        x: {
+            var pt = editor.mapToItem(win.contentItem, editor.cursorRectangle.x, editor.cursorRectangle.y);
+            return Math.min(win.width - width - 16, Math.max(16, pt.x));
+        }
+        y: {
+            var pt = editor.mapToItem(win.contentItem, editor.cursorRectangle.x, editor.cursorRectangle.y);
+            var targetY = pt.y + editor.cursorRectangle.height + 4;
+            if (targetY + height > win.height - 40)
+                return Math.max(16, pt.y - height - 4);
+            return targetY;
+        }
+        width: 320
+        height: Math.min(win.scaledSize(220), completionList.contentHeight + 10)
+        padding: 4
+        focus: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: win.darkMode ? "#21252b" : "#ffffff"
+            border.color: win.darkMode ? "#3a3f4b" : "#d0d4dc"
+            border.width: 1
+            radius: 6
+        }
+
+        ListView {
+            id: completionList
+            anchors.fill: parent
+            clip: true
+            model: backend.completions
+            delegate: Rectangle {
+                width: ListView.view.width
+                height: win.scaledSize(24)
+                color: ListView.isCurrentItem
+                    ? (win.darkMode ? "#2c313a" : "#e8edf5")
+                    : "transparent"
+                radius: 4
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    spacing: 8
+
+                    Label {
+                        text: modelData.label
+                        color: ListView.isCurrentItem ? win.strongTextColor : win.textColor
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(12)
+                        font.weight: ListView.isCurrentItem ? Font.Bold : Font.Normal
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                    }
+
+                    Label {
+                        text: modelData.detail || ""
+                        color: win.mutedColor
+                        font.family: "iA Writer Mono S"
+                        font.pixelSize: win.scaledSize(10)
+                        visible: text !== ""
+                        elide: Text.ElideRight
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: {
+                        completionList.currentIndex = index;
+                        editor.acceptCompletion();
+                    }
+                }
+            }
+        }
+    }
 
 
         Pane {

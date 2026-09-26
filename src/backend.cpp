@@ -127,6 +127,24 @@ Backend::Backend(QObject *parent) : QObject(parent) {
         loadOmarchyTheme();
         watchOmarchyTheme();
     });
+
+    m_lspSyncTimer.setSingleShot(true);
+    m_lspSyncTimer.setInterval(250);
+    connect(&m_lspSyncTimer, &QTimer::timeout, this, [this]() {
+        if (m_lspClient.isRunning())
+            m_lspClient.updateDocument(currentDocumentText());
+    });
+
+    connect(&m_lspClient, &LspClient::stateChanged, this, [this]() {
+        emit lspActiveChanged();
+        updateLspStatus();
+    });
+    connect(&m_lspClient, &LspClient::diagnosticsReceived,
+            this, &Backend::onLspDiagnostics);
+    connect(&m_lspClient, &LspClient::completionsReceived,
+            this, &Backend::onLspCompletions);
+    connect(&m_lspClient, &LspClient::definitionReceived,
+            this, &Backend::onLspDefinition);
 }
 
 Backend::~Backend() = default;
@@ -181,6 +199,8 @@ void Backend::attachDocument(QObject *textDocument) {
     m_highlighter = new MarkdownHighlighter(m_document);
     m_highlighter->setDarkMode(m_darkMode);
     m_highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
+    m_highlighter->setIsCode(isCodeDocument());
+    m_highlighter->setLanguage(LspClient::languageIdForUrl(m_fileUrl));
 
     connect(m_document, &QTextDocument::contentsChange, this,
             [this](int position, int, int charsAdded) {
@@ -188,10 +208,15 @@ void Backend::attachDocument(QObject *textDocument) {
                     return;
                 m_lastChangePos = position;
                 m_lastChangeAdded = charsAdded;
+                if (m_lspClient.isRunning())
+                    m_lspSyncTimer.start();
             });
 
     applyDocumentTypography();
     restoreRecovery();
+
+    if (LspClient::isSupportedFile(m_fileUrl))
+        m_lspClient.openDocument(m_fileUrl, currentDocumentText());
 }
 
 void Backend::openDialog() {
@@ -220,6 +245,17 @@ void Backend::open(const QUrl &url) {
     watchCurrentFile();
     setModified(false);
     setStatus(QStringLiteral("Opened %1").arg(fileName()));
+
+    if (m_highlighter) {
+        m_highlighter->setIsCode(isCodeDocument());
+        m_highlighter->setLanguage(LspClient::languageIdForUrl(url));
+    }
+    if (LspClient::isSupportedFile(url)) {
+        m_lspClient.openDocument(url, currentDocumentText());
+    } else {
+        m_lspClient.stopServer();
+    }
+    updateLspStatus();
 }
 
 void Backend::save() {
@@ -363,7 +399,7 @@ bool Backend::editorTextChanged() {
 
 QVariantList Backend::hiddenRangesAt(int position) const {
     QVariantList ranges;
-    if (!m_document)
+    if (!m_document || isCodeDocument())
         return ranges;
 
     const QTextBlock block =
@@ -423,6 +459,7 @@ void Backend::saveWindowGeometry(int x, int y, int width, int height, bool maxim
 }
 
 void Backend::loadDocumentText(const QString &text) {
+    m_lastDocumentText = text;
     if (!m_document) {
         setStatus(QStringLiteral("Could not attach the Markdown renderer."));
         return;
@@ -430,7 +467,6 @@ void Backend::loadDocumentText(const QString &text) {
 
     m_loading = true;
     m_document->setPlainText(text);
-    m_lastDocumentText = text;
     m_loading = false;
 
     applyDocumentTypography();
@@ -443,6 +479,9 @@ void Backend::setFileUrl(const QUrl &url) {
         return;
 
     m_fileUrl = url;
+    if (url.isLocalFile()) {
+        m_terminal.setInitialDirectory(QFileInfo(url.toLocalFile()).absolutePath());
+    }
     emit fileUrlChanged();
     watchCurrentFile();
 }
@@ -508,6 +547,16 @@ void Backend::saveTo(const QUrl &url) {
     setStatus(QStringLiteral("Saved %1").arg(fileName()));
     clearRecovery();
     emit saveSucceeded();
+
+    if (m_highlighter) {
+        m_highlighter->setIsCode(isCodeDocument());
+        m_highlighter->setLanguage(LspClient::languageIdForUrl(url));
+    }
+    if (m_lspClient.isRunning()) {
+        m_lspClient.saveDocument();
+    } else if (LspClient::isSupportedFile(url)) {
+        m_lspClient.openDocument(url, currentDocumentText());
+    }
 
     if (shouldClose)
         emit closeAfterSave();
@@ -675,7 +724,7 @@ QUrl Backend::suggestedSaveUrl() const {
 }
 
 QString Backend::currentDocumentText() const {
-    return m_document ? m_document->toPlainText() : QString();
+    return m_document ? m_document->toPlainText() : m_lastDocumentText;
 }
 
 int Backend::countWords(const QString &text) {
@@ -763,4 +812,150 @@ void Backend::reapplyTypographyToChange() {
     cursor.mergeBlockFormat(blockFormat);
     cursor.endEditBlock();
     m_formattingTypography = false;
+}
+
+bool Backend::isCodeDocument() const {
+    if (!m_fileUrl.isLocalFile())
+        return false;
+    const QString lang = LspClient::languageIdForUrl(m_fileUrl);
+    return !lang.isEmpty() && lang != QStringLiteral("markdown");
+}
+
+void Backend::onLspDiagnostics(const QList<LspDiagnostic> &diagnostics) {
+    QList<MarkdownHighlighter::DiagnosticItem> items;
+    items.reserve(diagnostics.size());
+    for (const LspDiagnostic &d : diagnostics) {
+        items.append({d.line, d.startChar, d.endChar, d.severity});
+    }
+
+    if (m_highlighter)
+        m_highlighter->setDiagnostics(items);
+
+    updateLspStatus();
+    updateCursorPosition(m_lastCursorPos);
+}
+
+void Backend::updateLspStatus() {
+    if (!m_lspClient.isRunning()) {
+        m_lspStatus.clear();
+        emit lspStatusChanged();
+        return;
+    }
+
+    const auto diags = m_lspClient.diagnostics();
+    int errors = 0;
+    int warnings = 0;
+    for (const auto &d : diags) {
+        if (d.severity == 1) errors++;
+        else if (d.severity == 2) warnings++;
+    }
+
+    if (errors > 0 || warnings > 0) {
+        QStringList parts;
+        if (errors > 0)
+            parts << QStringLiteral("%1 %2").arg(errors).arg(errors == 1 ? "error" : "errors");
+        if (warnings > 0)
+            parts << QStringLiteral("%1 %2").arg(warnings).arg(warnings == 1 ? "warning" : "warnings");
+        m_lspStatus = QStringLiteral("%1: %2").arg(m_lspClient.serverName(), parts.join(QStringLiteral(", ")));
+    } else {
+        m_lspStatus = QStringLiteral("%1: clean").arg(m_lspClient.serverName());
+    }
+
+    emit lspStatusChanged();
+}
+
+void Backend::onLspCompletions(const QVariantList &items, int line, int character) {
+    Q_UNUSED(line);
+    Q_UNUSED(character);
+    m_completions = items;
+    emit completionsChanged();
+}
+
+void Backend::clearCompletions() {
+    if (!m_completions.isEmpty()) {
+        m_completions.clear();
+        emit completionsChanged();
+    }
+}
+
+void Backend::onLspDefinition(const QString &targetUri, int targetLine, int targetCharacter) {
+    const QUrl url(targetUri);
+    if (url == m_fileUrl || targetUri == m_fileUrl.toString()) {
+        const int pos = lineColToPosition(targetLine, targetCharacter);
+        emit jumpToPositionRequested(pos);
+    }
+}
+
+void Backend::requestCompletion(int position) {
+    if (!m_lspClient.isRunning() || !m_document)
+        return;
+
+    const QTextBlock block = m_document->findBlock(position);
+    if (!block.isValid())
+        return;
+
+    const int line = block.blockNumber();
+    const int character = position - block.position();
+    m_lspClient.requestCompletion(line, character);
+}
+
+void Backend::requestDefinition(int position) {
+    if (!m_lspClient.isRunning() || !m_document)
+        return;
+
+    const QTextBlock block = m_document->findBlock(position);
+    if (!block.isValid())
+        return;
+
+    const int line = block.blockNumber();
+    const int character = position - block.position();
+    m_lspClient.requestDefinition(line, character);
+}
+
+void Backend::updateCursorPosition(int position) {
+    m_lastCursorPos = position;
+    if (!m_document)
+        return;
+
+    const QTextBlock block = m_document->findBlock(position);
+    if (!block.isValid())
+        return;
+
+    const int line = block.blockNumber();
+    const int col = position - block.position();
+
+    QString message;
+    const auto diags = m_lspClient.diagnostics();
+    for (const auto &d : diags) {
+        if (d.line == line && (col >= d.startChar || d.startChar == d.endChar)) {
+            message = d.message;
+            break;
+        }
+    }
+
+    if (m_currentDiagnostic != message) {
+        m_currentDiagnostic = message;
+        emit currentDiagnosticChanged();
+    }
+}
+
+int Backend::lineColToPosition(int line, int col) const {
+    if (!m_document)
+        return 0;
+    const QTextBlock block = m_document->findBlockByNumber(line);
+    if (!block.isValid())
+        return 0;
+    return block.position() + qBound(0, col, qMax(0, block.length() - 1));
+}
+
+QVariantMap Backend::positionToLineCol(int position) const {
+    QVariantMap map;
+    if (!m_document)
+        return map;
+    const QTextBlock block = m_document->findBlock(position);
+    if (!block.isValid())
+        return map;
+    map[QStringLiteral("line")] = block.blockNumber();
+    map[QStringLiteral("character")] = position - block.position();
+    return map;
 }

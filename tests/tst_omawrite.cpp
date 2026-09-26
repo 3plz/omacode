@@ -6,6 +6,8 @@
 #include <QQuickStyle>
 
 #include "backend.h"
+#include "linenumbergutter.h"
+#include "lspclient.h"
 #include "markdownhighlighter.h"
 
 class OmawriteTest : public QObject {
@@ -15,6 +17,7 @@ private slots:
     void initTestCase() {
         QVERIFY(m_settingsDirectory.isValid());
         QQuickStyle::setStyle(QStringLiteral("Material"));
+        qmlRegisterType<LineNumberGutter>("Omawrite", 1, 0, "LineNumberGutter");
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
                            m_settingsDirectory.path());
@@ -244,6 +247,56 @@ private slots:
         fallbackDocument.saveAsDialog();
         const QUrl fallbackUrl = fallbackDialogSpy.takeFirst().constFirst().toUrl();
         QCOMPARE(QFileInfo(fallbackUrl.toLocalFile()).absolutePath(), QDir::homePath());
+    }
+
+    void identifiesCodeDocuments() {
+        QCOMPARE(LspClient::languageIdForUrl(QUrl::fromLocalFile(QStringLiteral("/path/to/main.cpp"))),
+                 QStringLiteral("cpp"));
+        QCOMPARE(LspClient::languageIdForUrl(QUrl::fromLocalFile(QStringLiteral("/path/to/script.py"))),
+                 QStringLiteral("python"));
+        QCOMPARE(LspClient::languageIdForUrl(QUrl::fromLocalFile(QStringLiteral("/path/to/lib.rs"))),
+                 QStringLiteral("rust"));
+        QCOMPARE(LspClient::languageIdForUrl(QUrl::fromLocalFile(QStringLiteral("/path/to/notes.md"))),
+                 QStringLiteral("markdown"));
+
+        QTemporaryDir tmpDir;
+        QVERIFY(tmpDir.isValid());
+        const QString cppFile = tmpDir.filePath(QStringLiteral("test.cpp"));
+        QFile f(cppFile);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        f.write("int main() {\n    undeclared_test_var = 1;\n    return 0;\n}\n");
+        f.close();
+
+        Backend backend;
+        backend.open(QUrl::fromLocalFile(cppFile));
+        QVERIFY(backend.isCodeDocument());
+        QCOMPARE(backend.lspServerName(), QStringLiteral("clangd"));
+
+        QTRY_VERIFY_WITH_TIMEOUT(backend.lspActive(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(backend.lspStatus().contains(QStringLiteral("error")), 5000);
+    }
+
+    void highlightsCppCodeCorrectly() {
+        QTextDocument doc;
+        MarkdownHighlighter highlighter(&doc);
+        highlighter.setIsCode(true);
+        highlighter.setLanguage(QStringLiteral("cpp"));
+        doc.setPlainText(QStringLiteral("#include <iostream>\n// this is a comment\nint main() { return 0; }\n"));
+        highlighter.rehighlight();
+
+        // Block 0: #include <iostream>
+        // Formats applied by highlighter: #include (preprocessor) and <iostream> (string)
+        const auto b0Formats = doc.firstBlock().layout()->formats();
+        QVERIFY(!b0Formats.isEmpty());
+        // The first format should be #include (DemiBold preprocessor, NOT italic comment)
+        QCOMPARE(b0Formats.first().format.fontWeight(), QFont::DemiBold);
+        QVERIFY(!b0Formats.first().format.fontItalic());
+
+        // Block 1: // this is a comment
+        // Formats applied should be italic (comment)
+        const auto b1Formats = doc.findBlockByNumber(1).layout()->formats();
+        QVERIFY(!b1Formats.isEmpty());
+        QVERIFY(b1Formats.first().format.fontItalic());
     }
 
 private:

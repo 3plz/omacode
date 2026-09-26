@@ -54,6 +54,12 @@ Item {
                 context.lineTo(4.5, 9.5);
                 context.lineTo(11.5, 9.5);
                 context.lineTo(11.5, 13.5);
+            } else if (control.iconName === "terminal") {
+                context.moveTo(3, 4.5);
+                context.lineTo(7, 8);
+                context.lineTo(3, 11.5);
+                context.moveTo(8.5, 12);
+                context.lineTo(13, 12);
             } else {
                 context.moveTo(2.5, 13);
                 context.lineTo(2.5, 3.5);
